@@ -1,0 +1,152 @@
+package main
+
+import (
+	"net/http"
+	"sync"
+	"time"
+	"context"
+    "bytes"
+    "io"
+)
+
+func main() {
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+
+		// Pass the channel to the template.
+		component := Page()
+
+		// Serve using the streaming mode of the handler.
+		templ.Handler(component, templ.WithStreaming()).ServeHTTP(w, r)
+	})
+	http.ListenAndServe("127.0.0.1:8080", nil)
+}
+
+type SlotContents struct {
+	Name     string
+	Contents templ.Component
+}
+
+templ Slot(name string) {
+	<slot name={ name }>
+		<div>Loading { name }...</div>
+	</slot>
+}
+
+templ A() {
+    @templ.Flush() {
+        <div slot="a">
+            <div>Component A.</div>
+        </div>
+	}
+}
+
+templ B() {
+    @templ.Flush() {
+        <div slot="b">
+            <div>Component B.</div>
+        </div>
+	}
+}
+
+templ C() {
+    @templ.Flush() {
+        <div slot="c">
+            <div>Component C.</div>
+        </div>
+	}
+}
+
+templ Page() {
+	<!DOCTYPE html>
+	<html>
+		<head>
+			<title>Page</title>
+		</head>
+		<body>
+			<h1>Page</h1>
+			@templ.Flush() {
+				<template shadowrootmode="open">
+					@Slot("a")
+					@Slot("b")
+					@Slot("c")
+				</template>
+			}
+			@AllSlots()
+		</body>
+	</html>
+}
+
+func AllSlots() templ.Component {
+    return templruntime.GeneratedTemplate(func(input templruntime.GeneratedComponentInput) (err error) {
+		w, ctx := input.Writer, input.Context
+		renderer := newAsyncRenderer(ctx, w)
+		renderer.Add(A())
+		renderer.Add(B())
+		renderer.Add(C())
+		return renderer.Render()
+	})
+}
+
+// AsyncRender chatgpt generated async renderer
+type AsyncRender struct {
+    ctx        context.Context
+    w          io.Writer
+    components []*componentRender
+    mu         sync.Mutex
+}
+
+type componentRender struct {
+    buf bytes.Buffer
+    err error
+    wg  sync.WaitGroup
+}
+
+// newAsyncRenderer creates a new AsyncRender instance
+func newAsyncRenderer(ctx context.Context, w io.Writer) *AsyncRender {
+    return &AsyncRender{
+        ctx: ctx,
+        w:   w,
+    }
+}
+
+// Add adds a component to the renderer and starts its rendering in a new goroutine
+func (a *AsyncRender) Add(component templ.Component) {
+    cr := &componentRender{}
+    cr.wg.Add(1)
+
+    a.mu.Lock()
+    a.components = append(a.components, cr)
+    a.mu.Unlock()
+
+    // Start rendering in a separate goroutine
+    go func() {
+        defer cr.wg.Done()
+        cr.err = component.Render(a.ctx, &cr.buf)
+        time.Sleep(time.Second * 1)
+    }()
+}
+
+// Render waits for all components to finish rendering and writes them in order
+func (a *AsyncRender) Render() error {
+    a.mu.Lock()
+    components := make([]*componentRender, len(a.components))
+    copy(components, a.components)
+    a.mu.Unlock()
+
+    for _, cr := range components {
+        // Wait for the rendering of this component to complete
+        cr.wg.Wait()
+
+        if cr.err != nil {
+            // Handle error from rendering
+            return cr.err
+        }
+
+        // Write the rendered buffer to the writer
+        _, err := io.Copy(a.w, &cr.buf)
+        if err != nil {
+            return err
+        }
+    }
+    return nil
+}
